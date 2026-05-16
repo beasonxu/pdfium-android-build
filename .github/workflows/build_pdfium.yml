@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git cmake ninja-build python3 pkg-config wget curl unzip
+          sudo apt-get install -y git cmake ninja-build python3 pkg-config wget curl unzip binutils
 
       - name: Setup Android NDK
         run: |
@@ -44,8 +44,8 @@ jobs:
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-v5
-          restore-keys: pdfium-source-
+          key: pdfium-source-v6-clean
+          restore-keys: pdfium-source-v6-clean
 
       - name: Fetch PDFium source
         if: steps.cache-pdfium.outputs.cache-hit != 'true'
@@ -73,7 +73,10 @@ jobs:
           grep -q "Wunsafe-buffer-usage" $FILE || \
             sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
 
+          # 清除旧编译结果，强制重新编译
+          rm -rf out/android_${ABI}
           mkdir -p out/android_${ABI}
+
           cat > out/android_${ABI}/args.gn << EOF
           target_os = "android"
           target_cpu = "${CPU}"
@@ -91,49 +94,34 @@ jobs:
           ninja -j4 -C out/android_${ABI} pdfium
           echo "✅ Static lib done"
 
+          # 列出所有 .a 文件确认存在
+          echo "=== Static libs ==="
+          find out/android_${ABI}/obj -name "*.a" | head -10
+
           # NDK 工具链
           SYSROOT=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
-          case $ABI in
-            arm64-v8a)   CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++ ;;
-            armeabi-v7a) CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi29-clang++ ;;
-          esac
+          CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++
 
           # 收集所有 .a 文件
           STATIC_LIBS=$(find out/android_${ABI}/obj -name "*.a" | tr '\n' ' ')
 
-          # 创建符号导出文件，导出所有 FPDF_ 开头的符号
-          cat > /tmp/export_symbols.txt << 'SYMS'
-          {
-            global:
-              FPDF*;
-              FPDFAnnot*;
-              FPDFText*;
-              FPDFPage*;
-              FPDFBitmap*;
-              FPDFBookmark*;
-              FPDFDest*;
-              FPDFLink*;
-              FPDFAction*;
-              FPDFDOC*;
-              FPDFFormObj*;
-              FPDF_*;
-            local: *;
-          };
-          SYMS
-
+          # 先不用 version script，直接导出所有符号看看
           $CC -shared -fPIC \
             --sysroot=$SYSROOT \
             -Wl,--whole-archive $STATIC_LIBS -Wl,--no-whole-archive \
-            -Wl,--version-script=/tmp/export_symbols.txt \
+            -Wl,-z,defs \
             -lunwind \
             -o out/android_${ABI}/libpdfium.so
 
-          echo "✅ Shared lib done:"
+          echo "✅ Shared lib:"
           ls -lh out/android_${ABI}/libpdfium.so
 
-          # 验证符号是否导出
-          echo "=== 验证 FPDF_InitLibrary 符号 ==="
-          nm -D out/android_${ABI}/libpdfium.so | grep FPDF_Init || echo "❌ 符号未导出"
+          # 验证符号
+          echo "=== 所有导出符号数量 ==="
+          nm -D out/android_${ABI}/libpdfium.so | grep " T " | wc -l
+
+          echo "=== FPDF_ 符号 ==="
+          nm -D out/android_${ABI}/libpdfium.so | grep "FPDF_Init" || echo "❌ 未找到"
 
           # 收集产物
           mkdir -p $HOME/output/${ABI}/include
