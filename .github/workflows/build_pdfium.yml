@@ -8,21 +8,20 @@ on:
       target_cpu:
         description: 'Target CPU architecture'
         required: true
-        default: 'all'
+        default: 'arm64'
         type: choice
         options:
-          - all
           - arm64
           - arm
-          - x86_64
-          - x86
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     strategy:
+      max-parallel: 1
       matrix:
-        target_cpu: ${{ fromJson(github.event_name == 'workflow_dispatch' && inputs.target_cpu != 'all' && format('["{0}"]', inputs.target_cpu) || '["arm64", "arm", "x86_64", "x86"]') }}
+        target_cpu: ${{ fromJson(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.target_cpu) || '["arm64", "arm"]') }}
 
     steps:
       # ── 1. 系统依赖 ──────────────────────────────────────────────
@@ -39,25 +38,28 @@ jobs:
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
           echo "$HOME/depot_tools" >> $GITHUB_PATH
+          echo "DEPOT_TOOLS_UPDATE=0" >> $GITHUB_ENV
 
-      # ── 3. 缓存 PDFium 源码（加速后续构建）──────────────────────
+      # ── 3. 缓存 PDFium 源码 ──────────────────────────────────────
       - name: Cache PDFium source
         uses: actions/cache@v4
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-${{ hashFiles('**/DEPS') }}-v1
+          key: pdfium-source-v3
           restore-keys: |
             pdfium-source-
 
       # ── 4. 拉取 PDFium 源码 ──────────────────────────────────────
       - name: Fetch PDFium source
         if: steps.cache-pdfium.outputs.cache-hit != 'true'
+        timeout-minutes: 60
         run: |
           mkdir -p $HOME/pdfium_build && cd $HOME/pdfium_build
           gclient config --unmanaged https://pdfium.googlesource.com/pdfium.git
           echo 'target_os = ["android"]' >> .gclient
-          gclient sync --no-history --shallow
+          gclient sync --no-history --nohooks
+          gclient runhooks
 
       # ── 5. 生成编译配置 ──────────────────────────────────────────
       - name: Configure build (${{ matrix.target_cpu }})
@@ -74,20 +76,22 @@ jobs:
           pdf_enable_v8 = false
           pdf_enable_xfa = false
           use_custom_libcxx = false
+          use_remoteexec = false
           EOF
 
           gn gen out/android_${{ matrix.target_cpu }}
 
       # ── 6. 编译 ─────────────────────────────────────────────────
       - name: Build PDFium (${{ matrix.target_cpu }})
+        timeout-minutes: 60
         run: |
           cd $HOME/pdfium_build/pdfium
-          ninja -C out/android_${{ matrix.target_cpu }} pdfium
-          echo "Build complete. Output:"
+          ninja -j4 -C out/android_${{ matrix.target_cpu }} pdfium
+          echo "✅ Build complete:"
           ls -lh out/android_${{ matrix.target_cpu }}/libpdfium.so
 
-      # ── 7. 复制头文件 ────────────────────────────────────────────
-      - name: Collect headers and binary
+      # ── 7. 收集产物 ──────────────────────────────────────────────
+      - name: Collect output
         run: |
           mkdir -p $HOME/output/${{ matrix.target_cpu }}/include
           cp $HOME/pdfium_build/pdfium/out/android_${{ matrix.target_cpu }}/libpdfium.so \
