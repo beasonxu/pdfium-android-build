@@ -8,10 +8,9 @@ on:
       target_cpu:
         description: 'Target ABI'
         required: true
-        default: 'all'
+        default: 'arm64-v8a'
         type: choice
         options:
-          - all
           - arm64-v8a
           - armeabi-v7a
 
@@ -21,24 +20,18 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # ── 1. 系统依赖 ──────────────────────────────────────────────
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git cmake ninja-build python3 \
-            pkg-config wget curl unzip
+          sudo apt-get install -y git cmake ninja-build python3 pkg-config wget curl unzip
 
-      # ── 2. 安装 NDK ──────────────────────────────────────────────
       - name: Setup Android NDK
         run: |
           NDK_VERSION=r25c
           wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
           unzip -q android-ndk-${NDK_VERSION}-linux.zip
           echo "NDK_ROOT=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-          echo "✅ NDK installed at $PWD/android-ndk-${NDK_VERSION}"
 
-      # ── 3. 拉取 depot_tools + PDFium 源码 ───────────────────────
       - name: Setup depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
@@ -64,36 +57,24 @@ jobs:
           gclient sync --no-history --nohooks
           gclient runhooks
 
-      # ── 4. 编译所有 ABI ──────────────────────────────────────────
-      - name: Build all ABIs
+      - name: Build
         timeout-minutes: 90
         run: |
-          ABIS="${{ inputs.target_cpu == 'all' || github.event_name == 'push' && 'all' || inputs.target_cpu }}"
-          if [ "$ABIS" = "all" ]; then
-            ABIS="arm64-v8a armeabi-v7a"
-          fi
+          ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
+          case $ABI in
+            arm64-v8a)   CPU=arm64 ;;
+            armeabi-v7a) CPU=arm   ;;
+          esac
 
-          mkdir -p $HOME/output
+          cd $HOME/pdfium_build/pdfium
 
-          for ABI in $ABIS; do
-            echo "========== Building $ABI =========="
+          # 修复编译警告
+          FILE=core/fpdfapi/page/cpdf_psengine.cpp
+          grep -q "Wunsafe-buffer-usage" $FILE || \
+            sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
 
-            # ABI -> target_cpu 映射
-            case $ABI in
-              arm64-v8a)   CPU=arm64 ;;
-              armeabi-v7a) CPU=arm   ;;
-            esac
-
-            cd $HOME/pdfium_build/pdfium
-            mkdir -p out/android_${ABI}
-
-            # 修复编译警告
-            FILE=core/fpdfapi/page/cpdf_psengine.cpp
-            grep -q "Wunsafe-buffer-usage" $FILE || \
-              sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
-
-            # 写 args.gn
-            cat > out/android_${ABI}/args.gn << EOF
+          mkdir -p out/android_${ABI}
+          cat > out/android_${ABI}/args.gn << EOF
           target_os = "android"
           target_cpu = "${CPU}"
           is_debug = false
@@ -106,49 +87,62 @@ jobs:
           treat_warnings_as_errors = false
           EOF
 
-            gn gen out/android_${ABI}
+          gn gen out/android_${ABI}
+          ninja -j4 -C out/android_${ABI} pdfium
+          echo "✅ Static lib done"
 
-            # 编译静态库
-            ninja -j4 -C out/android_${ABI} pdfium
-            echo "✅ Static lib done for $ABI"
+          # NDK 工具链
+          SYSROOT=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          case $ABI in
+            arm64-v8a)   CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++ ;;
+            armeabi-v7a) CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi29-clang++ ;;
+          esac
 
-            # 用 NDK 手动链接成 .so
-            SYSROOT=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
-            case $ABI in
-              arm64-v8a)   CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++ ;;
-              armeabi-v7a) CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi29-clang++ ;;
-            esac
+          # 收集所有 .a 文件
+          STATIC_LIBS=$(find out/android_${ABI}/obj -name "*.a" | tr '\n' ' ')
 
-            # 收集所有 .a 文件
-            STATIC_LIBS=$(find out/android_${ABI}/obj -name "*.a" | tr '\n' ' ')
+          # 创建符号导出文件，导出所有 FPDF_ 开头的符号
+          cat > /tmp/export_symbols.txt << 'SYMS'
+          {
+            global:
+              FPDF*;
+              FPDFAnnot*;
+              FPDFText*;
+              FPDFPage*;
+              FPDFBitmap*;
+              FPDFBookmark*;
+              FPDFDest*;
+              FPDFLink*;
+              FPDFAction*;
+              FPDFDOC*;
+              FPDFFormObj*;
+              FPDF_*;
+            local: *;
+          };
+          SYMS
 
-            $CC -shared -fPIC \
-              --sysroot=$SYSROOT \
-              -Wl,--whole-archive $STATIC_LIBS -Wl,--no-whole-archive \
-              -lunwind \
-              -o out/android_${ABI}/libpdfium.so
+          $CC -shared -fPIC \
+            --sysroot=$SYSROOT \
+            -Wl,--whole-archive $STATIC_LIBS -Wl,--no-whole-archive \
+            -Wl,--version-script=/tmp/export_symbols.txt \
+            -lunwind \
+            -o out/android_${ABI}/libpdfium.so
 
-            echo "✅ Shared lib done:"
-            ls -lh out/android_${ABI}/libpdfium.so
+          echo "✅ Shared lib done:"
+          ls -lh out/android_${ABI}/libpdfium.so
 
-            # 收集产物
-            mkdir -p $HOME/output/${ABI}/include
-            cp out/android_${ABI}/libpdfium.so $HOME/output/${ABI}/
-            cp public/*.h $HOME/output/${ABI}/include/
-          done
+          # 验证符号是否导出
+          echo "=== 验证 FPDF_InitLibrary 符号 ==="
+          nm -D out/android_${ABI}/libpdfium.so | grep FPDF_Init || echo "❌ 符号未导出"
 
-      # ── 5. 上传产物 ──────────────────────────────────────────────
-      - name: Upload arm64-v8a
+          # 收集产物
+          mkdir -p $HOME/output/${ABI}/include
+          cp out/android_${ABI}/libpdfium.so $HOME/output/${ABI}/
+          cp public/*.h $HOME/output/${ABI}/include/
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libpdfium-android-arm64-v8a
-          path: ~/output/arm64-v8a/
-          retention-days: 30
-
-      - name: Upload armeabi-v7a
-        uses: actions/upload-artifact@v4
-        if: ${{ inputs.target_cpu == 'all' || github.event_name == 'push' }}
-        with:
-          name: libpdfium-android-armeabi-v7a
-          path: ~/output/armeabi-v7a/
+          name: libpdfium-android-${{ inputs.target_cpu || 'arm64-v8a' }}
+          path: ~/output/${{ inputs.target_cpu || 'arm64-v8a' }}/
           retention-days: 30
