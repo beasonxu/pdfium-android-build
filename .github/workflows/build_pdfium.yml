@@ -19,60 +19,35 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
 
-    # 抽取全局环境变量，防范工具链报错
-    env:
-      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
-      PATH: ${{ github.workspace }}/depot_tools:${{ os.PATH }}
-
     steps:
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git python3 pkg-config wget curl unzip sudo lsb-release
+          sudo apt-get install -y git python3 pkg-config wget curl unzip
 
       - name: Setup depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
-          # 写入 GITHUB_PATH 供后续步骤使用
           echo "$HOME/depot_tools" >> $GITHUB_PATH
-          
-          # 预先拉取 depot_tools 自身依赖
           cd $HOME/depot_tools
-          ./update_depot_tools
+          DEPOT_TOOLS_UPDATE=1 ./update_depot_tools
 
       - name: Cache PDFium source
         uses: actions/cache@v4
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-v8 # 更新 Key 顺便刷新缓存
-          restore-keys: pdfium-source-v8
+          key: pdfium-source-v7
+          restore-keys: pdfium-source-v7
 
       - name: Fetch PDFium source
+        if: steps.cache-pdfium.outputs.cache-hit != 'true'
+        timeout-minutes: 60
         run: |
-          export PATH="$HOME/depot_tools:$PATH"
           mkdir -p $HOME/pdfium_build && cd $HOME/pdfium_build
-          
-          # 如果缓存未命中，才初始化并同步源码
-          if [ "${{ steps.cache-pdfium.outputs.cache-hit }}" != 'true' ]; then
-            gclient config --unmanaged https://pdfium.googlesource.com/pdfium.git
-            echo 'target_os = ["android"]' >> .gclient
-            gclient sync --no-history --nohooks
-          fi
-
-      - name: Install Android Build Dependencies
-        run: |
-          export PATH="$HOME/depot_tools:$PATH"
-          cd $HOME/pdfium_build
-          
-          # 执行 Chromium 官方的依赖安装脚本（针对 Android）
-          if [ -f src/build/install-build-deps-android.sh ]; then
-            sudo src/build/install-build-deps-android.sh
-          elif [ -f pdfium/build/install-build-deps-android.sh ]; then
-            sudo pdfium/build/install-build-deps-android.sh
-          fi
-
-          # 无论缓存是否命中，必须重新执行 runhooks 刷新本地编译工具链
+          gclient config --unmanaged https://pdfium.googlesource.com/pdfium.git
+          echo 'target_os = ["android"]' >> .gclient
+          gclient sync --no-history --nohooks
           gclient runhooks
 
       - name: Patch source
@@ -81,12 +56,10 @@ jobs:
 
           # 修复 unsafe buffer 警告
           FILE=core/fpdfapi/page/cpdf_psengine.cpp
-          if [ -f "$FILE" ]; then
-            grep -q "Wunsafe-buffer-usage" $FILE || \
-              sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
-          fi
+          grep -q "Wunsafe-buffer-usage" $FILE || \
+            sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
 
-          # 在 BUILD.gn 末尾添加 shared_library target
+          # 在 BUILD.gn 末尾添加 shared_library target（如果还没有）
           if ! grep -q "pdfium_shared" BUILD.gn; then
             cat >> BUILD.gn << 'EOF'
 
@@ -100,7 +73,6 @@ jobs:
 
       - name: Configure
         run: |
-          export PATH="$HOME/depot_tools:$PATH"
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           case $ABI in
             arm64-v8a)   CPU=arm64 ;;
@@ -129,13 +101,9 @@ jobs:
       - name: Build shared library
         timeout-minutes: 90
         run: |
-          export PATH="$HOME/depot_tools:$PATH"
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           cd $HOME/pdfium_build/pdfium
-          
-          # 使用自动识别的 CPU 核心数进行并行编译，避免硬编码 -j4
-          NUM_CORES=$(nproc 2>/dev/null || echo 4)
-          ninja -j${NUM_CORES} -C out/android_${ABI} pdfium_shared
+          ninja -j4 -C out/android_${ABI} pdfium_shared
 
           echo "=== 编译产物 ==="
           find out/android_${ABI} -name "*.so"
@@ -143,7 +111,6 @@ jobs:
           echo "=== 验证符号 ==="
           SO=$(find out/android_${ABI} -name "libpdfium.so" | head -1)
           if [ -n "$SO" ]; then
-            # 使用 NDK 自带的 nm（或者直接用系统 nm，但 D 选项部分系统可能对交叉编译的 so 支持不好）
             nm -D $SO | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 符号未导出"
           fi
 
@@ -153,11 +120,6 @@ jobs:
           mkdir -p $HOME/output/${ABI}/include
 
           SO=$(find $HOME/pdfium_build/pdfium/out/android_${ABI} -name "libpdfium.so" | head -1)
-          if [ -z "$SO" ]; then
-            echo "❌ 未找到编译生成的 libpdfium.so"
-            exit 1
-          fi
-          
           echo "Found SO: $SO"
           cp "$SO" $HOME/output/${ABI}/libpdfium.so
           cp $HOME/pdfium_build/pdfium/public/*.h $HOME/output/${ABI}/include/
