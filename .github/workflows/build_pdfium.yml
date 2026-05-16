@@ -66,6 +66,9 @@ jobs:
           shared_library("pdfium_shared") {
             deps = [ ":pdfium" ]
             output_name = "pdfium"
+            # 强制导出所有符号
+            configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
+            configs -= [ "//build/config/gcc:symbol_visibility_hidden" ]
           }
           EOF
           fi
