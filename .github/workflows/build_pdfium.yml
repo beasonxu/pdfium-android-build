@@ -37,8 +37,13 @@ jobs:
       - name: Setup depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+          export PATH="$HOME/depot_tools:$PATH"
           echo "$HOME/depot_tools" >> $GITHUB_PATH
-          echo "DEPOT_TOOLS_UPDATE=0" >> $GITHUB_ENV
+          # 强制初始化 depot_tools（生成 python3_bin_reldir.txt）
+          cd $HOME/depot_tools
+          DEPOT_TOOLS_UPDATE=1 ./update_depot_tools
+          echo "✅ depot_tools initialized"
+          ls $HOME/depot_tools/python3_bin_reldir.txt
 
       # ── 3. 缓存 PDFium 源码 ──────────────────────────────────────
       - name: Cache PDFium source
@@ -46,7 +51,7 @@ jobs:
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-v3
+          key: pdfium-source-v4
           restore-keys: |
             pdfium-source-
 
