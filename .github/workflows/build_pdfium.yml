@@ -91,7 +91,6 @@ jobs:
             cat >> BUILD.gn << 'EOF'
 
           shared_library("pdfium_shared") {
-            complete_static_lib = true
             deps = [ ":pdfium" ]
             output_name = "pdfium"
           }
