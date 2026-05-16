@@ -41,7 +41,6 @@ jobs:
           echo "$HOME/depot_tools" >> $GITHUB_PATH
           cd $HOME/depot_tools
           DEPOT_TOOLS_UPDATE=1 ./update_depot_tools
-          echo "✅ depot_tools initialized"
           ls $HOME/depot_tools/python3_bin_reldir.txt
 
       # ── 3. 缓存 PDFium 源码 ──────────────────────────────────────
@@ -81,8 +80,6 @@ jobs:
           pdf_enable_xfa = false
           use_custom_libcxx = false
           use_remoteexec = false
-          # 关闭 unsafe buffer 检查（避免编译报错）
-          safe_browsing_mode = 0
           treat_warnings_as_errors = false
           EOF
 
@@ -92,9 +89,7 @@ jobs:
       - name: Patch cpdf_psengine.cpp
         run: |
           FILE=$HOME/pdfium_build/pdfium/core/fpdfapi/page/cpdf_psengine.cpp
-          # 在文件开头加上禁用 unsafe-buffer-usage 警告的 pragma
           sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
-          echo "✅ Patched $FILE"
 
       # ── 7. 编译 ─────────────────────────────────────────────────
       - name: Build PDFium (${{ matrix.target_cpu }})
@@ -102,19 +97,36 @@ jobs:
         run: |
           cd $HOME/pdfium_build/pdfium
           ninja -j4 -C out/android_${{ matrix.target_cpu }} pdfium
-          echo "✅ Build complete:"
-          ls -lh out/android_${{ matrix.target_cpu }}/libpdfium.so
 
-      # ── 8. 收集产物 ──────────────────────────────────────────────
+      # ── 8. 查找 .so 文件位置 ─────────────────────────────────────
+      - name: Find libpdfium.so
+        run: |
+          echo "=== 查找所有 .so 文件 ==="
+          find $HOME/pdfium_build/pdfium/out -name "*.so" 2>/dev/null
+          echo "=== out 目录结构 ==="
+          ls -la $HOME/pdfium_build/pdfium/out/android_${{ matrix.target_cpu }}/
+
+      # ── 9. 收集产物 ──────────────────────────────────────────────
       - name: Collect output
         run: |
           mkdir -p $HOME/output/${{ matrix.target_cpu }}/include
-          cp $HOME/pdfium_build/pdfium/out/android_${{ matrix.target_cpu }}/libpdfium.so \
-             $HOME/output/${{ matrix.target_cpu }}/
+
+          # 查找 .so 并复制
+          SO_FILE=$(find $HOME/pdfium_build/pdfium/out -name "libpdfium.so" | head -1)
+          if [ -z "$SO_FILE" ]; then
+            # 有时候编译产物叫 libpdfium.cr.so
+            SO_FILE=$(find $HOME/pdfium_build/pdfium/out -name "*.so" | head -1)
+          fi
+          echo "Found: $SO_FILE"
+          cp "$SO_FILE" $HOME/output/${{ matrix.target_cpu }}/libpdfium.so
+
           cp $HOME/pdfium_build/pdfium/public/*.h \
              $HOME/output/${{ matrix.target_cpu }}/include/
 
-      # ── 9. 上传产物 ──────────────────────────────────────────────
+          echo "✅ Output:"
+          ls -lh $HOME/output/${{ matrix.target_cpu }}/
+
+      # ── 10. 上传产物 ─────────────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
