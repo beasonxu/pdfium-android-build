@@ -23,14 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git cmake ninja-build python3 pkg-config wget curl unzip binutils
-
-      - name: Setup Android NDK
-        run: |
-          NDK_VERSION=r25c
-          wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
-          unzip -q android-ndk-${NDK_VERSION}-linux.zip
-          echo "NDK_ROOT=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          sudo apt-get install -y git python3 pkg-config wget curl unzip
 
       - name: Setup depot_tools
         run: |
@@ -44,8 +37,8 @@ jobs:
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-v6-clean
-          restore-keys: pdfium-source-v6-clean
+          key: pdfium-source-v7
+          restore-keys: pdfium-source-v7
 
       - name: Fetch PDFium source
         if: steps.cache-pdfium.outputs.cache-hit != 'true'
@@ -57,8 +50,29 @@ jobs:
           gclient sync --no-history --nohooks
           gclient runhooks
 
-      - name: Build
-        timeout-minutes: 90
+      - name: Patch source
+        run: |
+          cd $HOME/pdfium_build/pdfium
+
+          # 修复 unsafe buffer 警告
+          FILE=core/fpdfapi/page/cpdf_psengine.cpp
+          grep -q "Wunsafe-buffer-usage" $FILE || \
+            sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
+
+          # 在 BUILD.gn 末尾添加 shared_library target（如果还没有）
+          if ! grep -q "pdfium_shared" BUILD.gn; then
+            cat >> BUILD.gn << 'EOF'
+
+          shared_library("pdfium_shared") {
+            complete_static_lib = true
+            deps = [ ":pdfium" ]
+            output_name = "pdfium"
+          }
+          EOF
+          fi
+          echo "✅ Patched"
+
+      - name: Configure
         run: |
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           case $ABI in
@@ -67,13 +81,6 @@ jobs:
           esac
 
           cd $HOME/pdfium_build/pdfium
-
-          # 修复编译警告
-          FILE=core/fpdfapi/page/cpdf_psengine.cpp
-          grep -q "Wunsafe-buffer-usage" $FILE || \
-            sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
-
-          # 清除旧编译结果，强制重新编译
           rm -rf out/android_${ABI}
           mkdir -p out/android_${ABI}
 
@@ -91,42 +98,34 @@ jobs:
           EOF
 
           gn gen out/android_${ABI}
-          ninja -j4 -C out/android_${ABI} pdfium
-          echo "✅ Static lib done"
 
-          # 列出所有 .a 文件确认存在
-          echo "=== Static libs ==="
-          find out/android_${ABI}/obj -name "*.a" | head -10
+      - name: Build shared library
+        timeout-minutes: 90
+        run: |
+          ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
+          cd $HOME/pdfium_build/pdfium
+          ninja -j4 -C out/android_${ABI} pdfium_shared
 
-          # NDK 工具链
-          SYSROOT=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
-          CC=${{ env.NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++
+          echo "=== 编译产物 ==="
+          find out/android_${ABI} -name "*.so"
 
-          # 收集所有 .a 文件
-          STATIC_LIBS=$(find out/android_${ABI}/obj -name "*.a" | tr '\n' ' ')
+          echo "=== 验证符号 ==="
+          SO=$(find out/android_${ABI} -name "libpdfium.so" | head -1)
+          if [ -n "$SO" ]; then
+            nm -D $SO | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 符号未导出"
+          fi
 
-          # 先不用 version script，直接导出所有符号看看
-          $CC -shared -fPIC \
-            --sysroot=$SYSROOT \
-            -Wl,--whole-archive $STATIC_LIBS -Wl,--no-whole-archive \
-            -Wl,-z,defs \
-            -lunwind \
-            -o out/android_${ABI}/libpdfium.so
-
-          echo "✅ Shared lib:"
-          ls -lh out/android_${ABI}/libpdfium.so
-
-          # 验证符号
-          echo "=== 所有导出符号数量 ==="
-          nm -D out/android_${ABI}/libpdfium.so | grep " T " | wc -l
-
-          echo "=== FPDF_ 符号 ==="
-          nm -D out/android_${ABI}/libpdfium.so | grep "FPDF_Init" || echo "❌ 未找到"
-
-          # 收集产物
+      - name: Collect output
+        run: |
+          ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           mkdir -p $HOME/output/${ABI}/include
-          cp out/android_${ABI}/libpdfium.so $HOME/output/${ABI}/
-          cp public/*.h $HOME/output/${ABI}/include/
+
+          SO=$(find $HOME/pdfium_build/pdfium/out/android_${ABI} -name "libpdfium.so" | head -1)
+          echo "Found SO: $SO"
+          cp "$SO" $HOME/output/${ABI}/libpdfium.so
+          cp $HOME/pdfium_build/pdfium/public/*.h $HOME/output/${ABI}/include/
+
+          ls -lh $HOME/output/${ABI}/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
