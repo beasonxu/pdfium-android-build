@@ -122,8 +122,14 @@ jobs:
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           mkdir -p $HOME/output/${ABI}/include
 
-          SO=$(find $HOME/pdfium_build/pdfium/out/android_${ABI} -name "libpdfium.so" | head -1)
+          # 优先用 unstripped 版本（符号完整）
+          SO=$HOME/pdfium_build/pdfium/out/android_${ABI}/lib.unstripped/libpdfium.so
+          if [ ! -f "$SO" ]; then
+            SO=$(find $HOME/pdfium_build/pdfium/out/android_${ABI} -name "libpdfium.so" | head -1)
+          fi
           echo "Found SO: $SO"
+          echo "=== unstripped 符号验证 ==="
+          nm -D "$SO" | grep "FPDF_Init" && echo "✅ 符号存在" || echo "❌ 仍未找到"
           cp "$SO" $HOME/output/${ABI}/libpdfium.so
           cp $HOME/pdfium_build/pdfium/public/*.h $HOME/output/${ABI}/include/
 
