@@ -64,7 +64,31 @@ jobs:
           gclient sync --no-history --nohooks
           gclient runhooks
 
-      # ── 5. 生成编译配置 ──────────────────────────────────────────
+      # ── 5. 添加 shared_library target 到 BUILD.gn ────────────────
+      - name: Patch BUILD.gn to add shared library target
+        run: |
+          cd $HOME/pdfium_build/pdfium
+          # 在 BUILD.gn 末尾追加 shared_library target
+          cat >> BUILD.gn << 'EOF'
+
+          shared_library("pdfium_shared") {
+            deps = [ ":pdfium" ]
+            ldflags = [ "-latomic" ]
+            if (target_os == "android") {
+              configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
+            }
+          }
+          EOF
+          echo "✅ BUILD.gn patched"
+          tail -10 BUILD.gn
+
+      # ── 6. 修复 unsafe buffer 编译错误 ───────────────────────────
+      - name: Patch cpdf_psengine.cpp
+        run: |
+          FILE=$HOME/pdfium_build/pdfium/core/fpdfapi/page/cpdf_psengine.cpp
+          sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
+
+      # ── 7. 生成编译配置 ──────────────────────────────────────────
       - name: Configure build (${{ matrix.target_cpu }})
         run: |
           cd $HOME/pdfium_build/pdfium
@@ -85,39 +109,23 @@ jobs:
 
           gn gen out/android_${{ matrix.target_cpu }}
 
-      # ── 6. 修复 unsafe buffer 编译错误 ───────────────────────────
-      - name: Patch cpdf_psengine.cpp
-        run: |
-          FILE=$HOME/pdfium_build/pdfium/core/fpdfapi/page/cpdf_psengine.cpp
-          sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
-
-      # ── 7. 编译 ─────────────────────────────────────────────────
+      # ── 8. 编译 shared library ───────────────────────────────────
       - name: Build PDFium (${{ matrix.target_cpu }})
         timeout-minutes: 60
         run: |
           cd $HOME/pdfium_build/pdfium
-          ninja -j4 -C out/android_${{ matrix.target_cpu }} pdfium
-
-      # ── 8. 查找 .so 文件位置 ─────────────────────────────────────
-      - name: Find libpdfium.so
-        run: |
-          echo "=== 查找所有 .so 文件 ==="
-          find $HOME/pdfium_build/pdfium/out -name "*.so" 2>/dev/null
-          echo "=== out 目录结构 ==="
-          ls -la $HOME/pdfium_build/pdfium/out/android_${{ matrix.target_cpu }}/
+          ninja -j4 -C out/android_${{ matrix.target_cpu }} pdfium_shared
+          echo "✅ Build complete, searching for .so:"
+          find out/android_${{ matrix.target_cpu }} -name "*.so"
 
       # ── 9. 收集产物 ──────────────────────────────────────────────
       - name: Collect output
         run: |
           mkdir -p $HOME/output/${{ matrix.target_cpu }}/include
 
-          # 查找 .so 并复制
-          SO_FILE=$(find $HOME/pdfium_build/pdfium/out -name "libpdfium.so" | head -1)
-          if [ -z "$SO_FILE" ]; then
-            # 有时候编译产物叫 libpdfium.cr.so
-            SO_FILE=$(find $HOME/pdfium_build/pdfium/out -name "*.so" | head -1)
-          fi
+          SO_FILE=$(find $HOME/pdfium_build/pdfium/out -name "libpdfium_shared.so" | head -1)
           echo "Found: $SO_FILE"
+          # 重命名为 libpdfium.so 方便使用
           cp "$SO_FILE" $HOME/output/${{ matrix.target_cpu }}/libpdfium.so
 
           cp $HOME/pdfium_build/pdfium/public/*.h \
