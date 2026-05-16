@@ -73,7 +73,7 @@ jobs:
 
           shared_library("pdfium_shared") {
             deps = [ ":pdfium" ]
-            ldflags = [ "-latomic" ]
+            ldflags = []
             if (target_os == "android") {
               configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
             }
