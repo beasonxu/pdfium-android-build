@@ -1,3 +1,5 @@
+import os
+
 with open("BUILD.gn", "r") as f:
     content = f.read()
 
@@ -28,8 +30,7 @@ shared_library("pdfium_shared") {
 with open("BUILD.gn", "w") as f:
     f.write(content)
 
-# -z,defs 를 build/config/BUILD.gn 에서 제거
-import os
+# 去掉 -z,defs
 build_config = "build/config/BUILD.gn"
 if os.path.exists(build_config):
     with open(build_config, "r") as f:
@@ -37,17 +38,25 @@ if os.path.exists(build_config):
     cfg = cfg.replace('"-Wl,-z,defs"', '#"-Wl,-z,defs"')
     with open(build_config, "w") as f:
         f.write(cfg)
-    print("Removed -z,defs from build/config/BUILD.gn")
+    print("Removed -z,defs")
 
-# stack_trace_android.cc 에서 _Unwind_ 호출 제거
+# 直接修改 stack_trace_android.cc，把 _Unwind_ 实现替换成空实现
 trace_file = "base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/debug/stack_trace_android.cc"
 if os.path.exists(trace_file):
     with open(trace_file, "r") as f:
-        trace = f.read()
-    # _Unwind_ 함수 호출을 stub으로 교체
-    trace = '#define _Unwind_Backtrace(x,y) 0\n#define _Unwind_GetIP(x) 0\n' + trace
+        lines = f.readlines()
+
+    new_lines = []
+    skip = False
+    for line in lines:
+        # 把用到 _Unwind_Backtrace 和 _Unwind_GetIP 的函数体替换成空实现
+        if '_Unwind_Backtrace' in line or '_Unwind_GetIP' in line:
+            new_lines.append('  // stubbed out\n')
+        else:
+            new_lines.append(line)
+
     with open(trace_file, "w") as f:
-        f.write(trace)
+        f.writelines(new_lines)
     print("Stubbed _Unwind_ calls in stack_trace_android.cc")
 
 print("All patches done")
