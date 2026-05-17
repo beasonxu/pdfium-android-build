@@ -50,7 +50,7 @@ jobs:
           gclient sync --no-history --nohooks
           gclient runhooks
 
-      - name: Patch BUILD.gn
+      - name: Patch source
         run: |
           cd $HOME/pdfium_build/pdfium
 
@@ -59,64 +59,34 @@ jobs:
           grep -q "Wunsafe-buffer-usage" $FILE || \
             sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
 
-          # 关键两步：加 fvisibility=default 和 FPDFSDK_EXPORTS
-          python3 patch_build.py
+          # 用 python 修改 BUILD.gn，加 fvisibility=default 和 FPDFSDK_EXPORTS
+          python3 - << 'EOF'
+with open("BUILD.gn", "r") as f:
+    content = f.read()
+
+if 'fvisibility=default' not in content:
+    content = content.replace(
+        'config("pdfium_common_config") {',
+        'config("pdfium_common_config") {\n  cflags = [ "-fvisibility=default" ]'
+    )
+    print("Added fvisibility=default")
+
+if 'FPDFSDK_EXPORTS' not in content:
+    content = content.replace(
+        '"PNG_USE_READ_MACROS",',
+        '"PNG_USE_READ_MACROS",\n    "FPDFSDK_EXPORTS",'
+    )
+    print("Added FPDFSDK_EXPORTS")
+
+with open("BUILD.gn", "w") as f:
+    f.write(content)
+print("BUILD.gn patch done")
+EOF
 
           # 添加 shared_library target
           if ! grep -q "pdfium_shared" BUILD.gn; then
             printf '\nshared_library("pdfium_shared") {\n  deps = [ ":pdfium" ]\n  output_name = "pdfium"\n  configs -= [ "//build/config/android:hide_all_but_jni_onload" ]\n}\n' >> BUILD.gn
-          fi
-
-          echo "✅ BUILD.gn patched"
-          grep -A3 "pdfium_common_config" BUILD.gn | head -6
-
-        env:
-          PATCH_SCRIPT: |
-            import re
-            with open("BUILD.gn", "r") as f:
-                content = f.read()
-            if 'fvisibility=default' not in content:
-                content = content.replace(
-                    'config("pdfium_common_config") {',
-                    'config("pdfium_common_config") {\n  cflags = [ "-fvisibility=default" ]'
-                )
-            if 'FPDFSDK_EXPORTS' not in content:
-                content = content.replace(
-                    '"PNG_USE_READ_MACROS",',
-                    '"PNG_USE_READ_MACROS",\n    "FPDFSDK_EXPORTS",'
-                )
-            with open("BUILD.gn", "w") as f:
-                f.write(content)
-            print("Done")
-
-      - name: Write patch script
-        run: |
-          cat > $HOME/pdfium_build/pdfium/patch_build.py << 'EOF'
-          with open("BUILD.gn", "r") as f:
-              content = f.read()
-          if 'fvisibility=default' not in content:
-              content = content.replace(
-                  'config("pdfium_common_config") {',
-                  'config("pdfium_common_config") {\n  cflags = [ "-fvisibility=default" ]'
-              )
-          if 'FPDFSDK_EXPORTS' not in content:
-              content = content.replace(
-                  '"PNG_USE_READ_MACROS",',
-                  '"PNG_USE_READ_MACROS",\n    "FPDFSDK_EXPORTS",'
-              )
-          with open("BUILD.gn", "w") as f:
-              f.write(content)
-          print("BUILD.gn patched successfully")
-          EOF
-
-      - name: Apply patch
-        run: |
-          cd $HOME/pdfium_build/pdfium
-          python3 patch_build.py
-
-          # 添加 shared_library target
-          if ! grep -q "pdfium_shared" BUILD.gn; then
-            printf '\nshared_library("pdfium_shared") {\n  deps = [ ":pdfium" ]\n  output_name = "pdfium"\n  configs -= [ "//build/config/android:hide_all_but_jni_onload" ]\n}\n' >> BUILD.gn
+            echo "Added pdfium_shared target"
           fi
 
           echo "=== 验证 patch ==="
