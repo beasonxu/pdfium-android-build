@@ -1,0 +1,37 @@
+name: Extract Chromium PDF Save Code
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Sparse clone Chromium PDF directory
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://chromium.googlesource.com/chromium/src.git chromium-src
+          cd chromium-src
+          git sparse-checkout set pdf/
+
+      - name: Extract save-related code
+        run: |
+          cd chromium-src
+          echo "=== pdfium_engine.cc save functions ==="
+          grep -n "Save\|save\|WriteBlock\|FPDF_Save" pdf/pdfium/pdfium_engine.cc | head -50
+
+          echo "=== Save function implementation ==="
+          # 提取 SaveAs 相关函数
+          awk '/SaveAs|SaveDocument|FPDF_FileWrite/{found=1} found{print; if(/^}/) {found=0}}' \
+            pdf/pdfium/pdfium_engine.cc | head -100
+
+      - name: Upload extracted files
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-pdf-save-code
+          path: |
+            chromium-src/pdf/pdfium/pdfium_engine.cc
+            chromium-src/pdf/pdfium/pdfium_engine.h
+            chromium-src/pdf/pdfium/pdfium_page.cc
+          retention-days: 7
