@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -59,29 +62,9 @@ jobs:
           grep -q "Wunsafe-buffer-usage" $FILE || \
             sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
 
-          # 用 python 修改 BUILD.gn，加 fvisibility=default 和 FPDFSDK_EXPORTS
-          python3 - << 'EOF'
-with open("BUILD.gn", "r") as f:
-    content = f.read()
-
-if 'fvisibility=default' not in content:
-    content = content.replace(
-        'config("pdfium_common_config") {',
-        'config("pdfium_common_config") {\n  cflags = [ "-fvisibility=default" ]'
-    )
-    print("Added fvisibility=default")
-
-if 'FPDFSDK_EXPORTS' not in content:
-    content = content.replace(
-        '"PNG_USE_READ_MACROS",',
-        '"PNG_USE_READ_MACROS",\n    "FPDFSDK_EXPORTS",'
-    )
-    print("Added FPDFSDK_EXPORTS")
-
-with open("BUILD.gn", "w") as f:
-    f.write(content)
-print("BUILD.gn patch done")
-EOF
+          # 复制 patch 脚本并执行
+          cp $GITHUB_WORKSPACE/patch_build.py .
+          python3 patch_build.py
 
           # 添加 shared_library target
           if ! grep -q "pdfium_shared" BUILD.gn; then
@@ -92,7 +75,6 @@ EOF
           echo "=== 验证 patch ==="
           grep "fvisibility" BUILD.gn | head -3
           grep "FPDFSDK_EXPORTS" BUILD.gn | head -3
-          grep "pdfium_shared" BUILD.gn | head -3
 
       - name: Configure
         run: |
@@ -127,9 +109,6 @@ EOF
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           cd $HOME/pdfium_build/pdfium
           ninja -j4 -C out/android_${ABI} pdfium_shared
-
-          echo "=== 编译产物 ==="
-          find out/android_${ABI} -name "*.so"
 
           echo "=== 验证符号 ==="
           SO=$(find out/android_${ABI} -name "libpdfium.so" | grep -v unstripped | head -1)
