@@ -37,8 +37,8 @@ jobs:
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-v7
-          restore-keys: pdfium-source-v7
+          key: pdfium-source-v8
+          restore-keys: pdfium-source-v8
 
       - name: Fetch PDFium source
         if: steps.cache-pdfium.outputs.cache-hit != 'true'
@@ -50,7 +50,7 @@ jobs:
           gclient sync --no-history --nohooks
           gclient runhooks
 
-      - name: Patch source
+      - name: Patch BUILD.gn
         run: |
           cd $HOME/pdfium_build/pdfium
 
@@ -59,20 +59,70 @@ jobs:
           grep -q "Wunsafe-buffer-usage" $FILE || \
             sed -i '1s/^/#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"\n/' $FILE
 
-          # 在 BUILD.gn 末尾添加 shared_library target（如果还没有）
-          if ! grep -q "pdfium_shared" BUILD.gn; then
-            cat >> BUILD.gn << 'EOF'
+          # 关键两步：加 fvisibility=default 和 FPDFSDK_EXPORTS
+          python3 patch_build.py
 
-          shared_library("pdfium_shared") {
-            deps = [ ":pdfium" ]
-            output_name = "pdfium"
-            # 强制导出所有符号
-            configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
-            configs -= [ "//build/config/gcc:symbol_visibility_hidden" ]
-          }
-          EOF
+          # 添加 shared_library target
+          if ! grep -q "pdfium_shared" BUILD.gn; then
+            printf '\nshared_library("pdfium_shared") {\n  deps = [ ":pdfium" ]\n  output_name = "pdfium"\n  configs -= [ "//build/config/android:hide_all_but_jni_onload" ]\n}\n' >> BUILD.gn
           fi
-          echo "✅ Patched"
+
+          echo "✅ BUILD.gn patched"
+          grep -A3 "pdfium_common_config" BUILD.gn | head -6
+
+        env:
+          PATCH_SCRIPT: |
+            import re
+            with open("BUILD.gn", "r") as f:
+                content = f.read()
+            if 'fvisibility=default' not in content:
+                content = content.replace(
+                    'config("pdfium_common_config") {',
+                    'config("pdfium_common_config") {\n  cflags = [ "-fvisibility=default" ]'
+                )
+            if 'FPDFSDK_EXPORTS' not in content:
+                content = content.replace(
+                    '"PNG_USE_READ_MACROS",',
+                    '"PNG_USE_READ_MACROS",\n    "FPDFSDK_EXPORTS",'
+                )
+            with open("BUILD.gn", "w") as f:
+                f.write(content)
+            print("Done")
+
+      - name: Write patch script
+        run: |
+          cat > $HOME/pdfium_build/pdfium/patch_build.py << 'EOF'
+          with open("BUILD.gn", "r") as f:
+              content = f.read()
+          if 'fvisibility=default' not in content:
+              content = content.replace(
+                  'config("pdfium_common_config") {',
+                  'config("pdfium_common_config") {\n  cflags = [ "-fvisibility=default" ]'
+              )
+          if 'FPDFSDK_EXPORTS' not in content:
+              content = content.replace(
+                  '"PNG_USE_READ_MACROS",',
+                  '"PNG_USE_READ_MACROS",\n    "FPDFSDK_EXPORTS",'
+              )
+          with open("BUILD.gn", "w") as f:
+              f.write(content)
+          print("BUILD.gn patched successfully")
+          EOF
+
+      - name: Apply patch
+        run: |
+          cd $HOME/pdfium_build/pdfium
+          python3 patch_build.py
+
+          # 添加 shared_library target
+          if ! grep -q "pdfium_shared" BUILD.gn; then
+            printf '\nshared_library("pdfium_shared") {\n  deps = [ ":pdfium" ]\n  output_name = "pdfium"\n  configs -= [ "//build/config/android:hide_all_but_jni_onload" ]\n}\n' >> BUILD.gn
+          fi
+
+          echo "=== 验证 patch ==="
+          grep "fvisibility" BUILD.gn | head -3
+          grep "FPDFSDK_EXPORTS" BUILD.gn | head -3
+          grep "pdfium_shared" BUILD.gn | head -3
 
       - name: Configure
         run: |
@@ -97,22 +147,11 @@ jobs:
           use_custom_libcxx = false
           use_remoteexec = false
           treat_warnings_as_errors = false
-          symbol_level = 1
           EOF
-
-          # 强制所有 FPDF_EXPORT 符号可见
-          echo "Patching fpdf_export.h..."
-          cat > $HOME/pdfium_build/pdfium/public/fpdf_export.h << 'HEADER'
-          #ifndef PUBLIC_FPDF_EXPORT_H_
-          #define PUBLIC_FPDF_EXPORT_H_
-          #define FPDF_EXPORT __attribute__((visibility("default")))
-          #define FPDF_CALLCONV
-          #endif  // PUBLIC_FPDF_EXPORT_H_
-          HEADER
 
           gn gen out/android_${ABI}
 
-      - name: Build shared library
+      - name: Build
         timeout-minutes: 90
         run: |
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
@@ -123,34 +162,16 @@ jobs:
           find out/android_${ABI} -name "*.so"
 
           echo "=== 验证符号 ==="
-          SO=$(find out/android_${ABI} -name "libpdfium.so" | head -1)
-          if [ -n "$SO" ]; then
-            nm -D $SO | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 符号未导出"
-          fi
+          SO=$(find out/android_${ABI} -name "libpdfium.so" | grep -v unstripped | head -1)
+          nm -D "$SO" | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 符号未导出"
 
       - name: Collect output
         run: |
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           mkdir -p $HOME/output/${ABI}/include
-
-          SO=$HOME/pdfium_build/pdfium/out/android_${ABI}/lib.unstripped/libpdfium.so
-          echo "Found SO: $SO"
-
-          # 用 NDK 的 llvm-objcopy 把所有符号设为全局可见
-          OBJCOPY=$HOME/pdfium_build/pdfium/third_party/llvm-build/Release+Asserts/bin/llvm-objcopy
-          OUTPUT=$HOME/output/${ABI}/libpdfium.so
-
-          # 把所有本地符号（t/d/r）改为全局导出（T/D/R）
-          $OBJCOPY --globalize-symbols=<(nm "$SO" | grep " [tTdDrRbB] " | grep "FPDF" | awk '{print $3}')             "$SO" "$OUTPUT" 2>/dev/null || cp "$SO" "$OUTPUT"
-
-          echo "=== 验证符号 ==="
-          nm -D "$OUTPUT" | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 仍未找到，检查编译参数"
-
-          # 最终 fallback：直接看 .a 文件里有没有符号
-          echo "=== 静态库里的 FPDF_ 符号 ==="
-          nm $HOME/pdfium_build/pdfium/out/android_${ABI}/obj/fpdfsdk/libfpdfsdk.a 2>/dev/null | grep "FPDF_Init" | head -5
+          SO=$(find $HOME/pdfium_build/pdfium/out/android_${ABI} -name "libpdfium.so" | grep -v unstripped | head -1)
+          cp "$SO" $HOME/output/${ABI}/libpdfium.so
           cp $HOME/pdfium_build/pdfium/public/*.h $HOME/output/${ABI}/include/
-
           ls -lh $HOME/output/${ABI}/
 
       - name: Upload artifact
