@@ -133,15 +133,22 @@ jobs:
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           mkdir -p $HOME/output/${ABI}/include
 
-          # 优先用 unstripped 版本（符号完整）
           SO=$HOME/pdfium_build/pdfium/out/android_${ABI}/lib.unstripped/libpdfium.so
-          if [ ! -f "$SO" ]; then
-            SO=$(find $HOME/pdfium_build/pdfium/out/android_${ABI} -name "libpdfium.so" | head -1)
-          fi
           echo "Found SO: $SO"
-          echo "=== unstripped 符号验证 ==="
-          nm -D "$SO" | grep "FPDF_Init" && echo "✅ 符号存在" || echo "❌ 仍未找到"
-          cp "$SO" $HOME/output/${ABI}/libpdfium.so
+
+          # 用 NDK 的 llvm-objcopy 把所有符号设为全局可见
+          OBJCOPY=$HOME/pdfium_build/pdfium/third_party/llvm-build/Release+Asserts/bin/llvm-objcopy
+          OUTPUT=$HOME/output/${ABI}/libpdfium.so
+
+          # 把所有本地符号（t/d/r）改为全局导出（T/D/R）
+          $OBJCOPY --globalize-symbols=<(nm "$SO" | grep " [tTdDrRbB] " | grep "FPDF" | awk '{print $3}')             "$SO" "$OUTPUT" 2>/dev/null || cp "$SO" "$OUTPUT"
+
+          echo "=== 验证符号 ==="
+          nm -D "$OUTPUT" | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 仍未找到，检查编译参数"
+
+          # 最终 fallback：直接看 .a 文件里有没有符号
+          echo "=== 静态库里的 FPDF_ 符号 ==="
+          nm $HOME/pdfium_build/pdfium/out/android_${ABI}/obj/fpdfsdk/libfpdfsdk.a 2>/dev/null | grep "FPDF_Init" | head -5
           cp $HOME/pdfium_build/pdfium/public/*.h $HOME/output/${ABI}/include/
 
           ls -lh $HOME/output/${ABI}/
