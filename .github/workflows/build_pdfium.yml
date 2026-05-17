@@ -97,7 +97,18 @@ jobs:
           use_custom_libcxx = false
           use_remoteexec = false
           treat_warnings_as_errors = false
+          symbol_level = 1
           EOF
+
+          # 强制所有 FPDF_EXPORT 符号可见
+          echo "Patching fpdf_export.h..."
+          cat > $HOME/pdfium_build/pdfium/public/fpdf_export.h << 'HEADER'
+          #ifndef PUBLIC_FPDF_EXPORT_H_
+          #define PUBLIC_FPDF_EXPORT_H_
+          #define FPDF_EXPORT __attribute__((visibility("default")))
+          #define FPDF_CALLCONV
+          #endif  // PUBLIC_FPDF_EXPORT_H_
+          HEADER
 
           gn gen out/android_${ABI}
 
