@@ -40,23 +40,27 @@ if os.path.exists(build_config):
         f.write(cfg)
     print("Removed -z,defs")
 
-# 直接修改 stack_trace_android.cc，把 _Unwind_ 实现替换成空实现
+# 整个文件替换成空实现，彻底避免 _Unwind_ 依赖
 trace_file = "base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/debug/stack_trace_android.cc"
 if os.path.exists(trace_file):
-    with open(trace_file, "r") as f:
-        lines = f.readlines()
+    stub = '''// Copyright 2024 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
 
-    new_lines = []
-    skip = False
-    for line in lines:
-        # 把用到 _Unwind_Backtrace 和 _Unwind_GetIP 的函数体替换成空实现
-        if '_Unwind_Backtrace' in line or '_Unwind_GetIP' in line:
-            new_lines.append('  // stubbed out\n')
-        else:
-            new_lines.append(line)
+// Stubbed out to avoid _Unwind_ dependency when building as shared library.
 
+#include "partition_alloc/partition_alloc_base/debug/stack_trace.h"
+
+namespace partition_alloc::internal::base::debug {
+
+bool CollectStackTrace(const void** trace, size_t count) {
+  return false;
+}
+
+}  // namespace partition_alloc::internal::base::debug
+'''
     with open(trace_file, "w") as f:
-        f.writelines(new_lines)
-    print("Stubbed _Unwind_ calls in stack_trace_android.cc")
+        f.write(stub)
+    print("Replaced stack_trace_android.cc with stub")
 
 print("All patches done")
