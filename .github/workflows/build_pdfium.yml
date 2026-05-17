@@ -40,8 +40,8 @@ jobs:
         id: cache-pdfium
         with:
           path: ~/pdfium_build
-          key: pdfium-source-v8
-          restore-keys: pdfium-source-v8
+          key: pdfium-source-v9
+          restore-keys: pdfium-source-v9
 
       - name: Fetch PDFium source
         if: steps.cache-pdfium.outputs.cache-hit != 'true'
