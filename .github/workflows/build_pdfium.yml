@@ -108,7 +108,7 @@ jobs:
         run: |
           ABI="${{ inputs.target_cpu || 'arm64-v8a' }}"
           cd $HOME/pdfium_build/pdfium
-          ninja -j4 -C out/android_${ABI} pdfium_shared
+          ninja -j4 -C out/android_${ABI} pdfium
 
           echo "=== 验证符号 ==="
           SO=$(find out/android_${ABI} -name "libpdfium.so" | grep -v unstripped | head -1)
