@@ -96,10 +96,19 @@ jobs:
           echo "=== 编译产物 ==="
           find pdfium/out -name "*.so" | head -10
 
-          echo "=== 验证符号 ==="
+          echo "=== 验证符号（stripped）==="
           SO=$(find pdfium/out -name "libpdfium.so" | grep -v unstripped | head -1)
           echo "SO: $SO"
           nm -D "$SO" | grep "FPDF_Init" && echo "✅ 符号导出成功" || echo "❌ 符号未导出"
+
+          echo "=== 验证符号（unstripped）==="
+          SO2=$(find pdfium/out -name "libpdfium.so" | grep unstripped | head -1)
+          echo "SO2: $SO2"
+          nm -D "$SO2" | grep "FPDF_Init" && echo "✅ unstripped 符号存在" || echo "❌ unstripped 也没有"
+
+          echo "=== 所有导出符号数量 ==="
+          nm -D "$SO" | wc -l
+          nm -D "$SO2" | wc -l
 
       - name: Collect output
         run: |
